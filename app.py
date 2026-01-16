@@ -322,14 +322,23 @@ if not df.empty:
 
     with col_table:
         st.subheader("Détail par Levier")
-        # Petit tableau récapitulatif à droite
-        df_summary = df.groupby("Levier")[["VA", "Visites"]].sum().reset_index().sort_values("VA", ascending=False)
+        # --- TABLEAU CORRIGÉ AVEC TOUTES LES COLONNES ---
+        # On agrège par levier
+        df_summary = df.groupby("Levier")[["VA", "Visites", "Commandes"]].sum().reset_index().sort_values("VA", ascending=False)
+        # On recalcule les taux sur les sommes
+        df_summary["Tx_Conv"] = df_summary["Commandes"] / df_summary["Visites"].replace(0, 1)
+        df_summary["Panier_Moyen"] = df_summary["VA"] / df_summary["Commandes"].replace(0, 1)
+
         st.dataframe(
             df_summary,
             use_container_width=True,
             column_config={
-                "VA": st.column_config.NumberColumn(format="%.0f €"),
-                "Visites": st.column_config.NumberColumn(format="%d"),
+                "Levier": st.column_config.TextColumn("Levier"),
+                "VA": st.column_config.NumberColumn("VA", format="%.0f €"),
+                "Visites": st.column_config.NumberColumn("Visites", format="%d"),
+                "Commandes": st.column_config.NumberColumn("Cmds", format="%d"),
+                "Tx_Conv": st.column_config.NumberColumn("Conv.", format="%.2f%%"),
+                "Panier_Moyen": st.column_config.NumberColumn("PM", format="%.0f €"),
             },
             hide_index=True
         )
