@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import re
+import hmac
 import os
 from datetime import datetime
 try:
@@ -11,51 +12,68 @@ except ImportError:
 from mistralai import Mistral
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION & SÉCURITÉ
 # ==========================================
-st.set_page_config(page_title="Eulerian Analyst Pro", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Eulerian Analyst Pro", page_icon="🔒", layout="wide")
 
-# ⚠️ VOS CLÉS
-MISTRAL_API_KEY = "4RYLP7nnLh8BsoCRaaHA4pryfyLgIaxt" 
-EULERIAN_TOKEN = "PC3qOHIpm.Vp0nKozLS_XfY50IDyOEOXb8EFi07MAsFPmw--"
-EULERIAN_USER_TOKEN = "QV.tEbjPNGLjgHPax6VWH_oe8sU7fhKeoQV7eaAVymv2erwLJQ--"
+def check_password():
+    """Vérifie le mot de passe pour accéder à l'app."""
+    def password_entered():
+        if hmac.compare_digest(st.session_state["password"], "SNCF_TEAM_2024"):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.title("🔒 Accès Sécurisé - SNCF Connect")
+    st.text_input("Mot de passe équipe", type="password", on_change=password_entered, key="password")
+    if "password_correct" in st.session_state:
+        st.error("Mot de passe incorrect")
+    return False
+
+if not check_password():
+    st.stop()
+
+# --- VOS CLÉS ---
+try:
+    MISTRAL_API_KEY = st.secrets["MISTRAL_API_KEY"]
+    EULERIAN_TOKEN = st.secrets["EULERIAN_TOKEN"]
+    EULERIAN_USER_TOKEN = st.secrets["EULERIAN_USER_TOKEN"]
+except:
+    MISTRAL_API_KEY = "4RYLP7nnLh8BsoCRaaHA4pryfyLgIaxt" 
+    EULERIAN_TOKEN = "PC3qOHIpm.Vp0nKozLS_XfY50IDyOEOXb8EFi07MAsFPmw--"
+    EULERIAN_USER_TOKEN = "QV.tEbjPNGLjgHPax6VWH_oe8sU7fhKeoQV7eaAVymv2erwLJQ--"
+
 EULERIAN_HOST = "sncfc.api.eulerian.com"
 EULERIAN_SITE = "sncf-connect"
 
 # ==========================================
-# 2. MOTEUR DE DONNÉES (FIABLE 100%)
+# 2. MOTEUR DE DONNÉES (FIABLE)
 # ==========================================
 @st.cache_data(ttl=3600)
-def get_data_v3():
-    # Codes techniques pour l'API
+def get_data():
     METRICS = [
-        ("visit", "visit"),
+        ("visit", "Visites"),
         ("dvisitor", "dvisitor"),
         ("hit", "hit"),
         ("realscartvalidamount", "realscartvalidamount"),
         ("realscartvalid", "realscartvalid")
     ]
-    
     metrics_payload = [{"name": name, "field": field} for name, field in METRICS]
     
     url = f"https://{EULERIAN_HOST}/ea/v2/ea/{EULERIAN_SITE}/report/batch/query.json"
-    headers = {
-        "Authorization": f"Bearer {EULERIAN_TOKEN}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {EULERIAN_TOKEN}", "Content-Type": "application/json", "Accept": "application/json"}
     
     payload = {
-        "async": False,
-        "userToken": EULERIAN_USER_TOKEN,
+        "async": False, "userToken": EULERIAN_USER_TOKEN,
         "reports": [{
-            "kind": "rt#insummary",
-            "path": "mcMEDIAINCOMING[?].*",
+            "kind": "rt#insummary", "path": "mcMEDIAINCOMING[?].*",
             "dimensions": [{"name": "media_key", "field": "media_key"}],
             "metrics": metrics_payload,
-            "dateRanges": [{"range": "LAST_7_DAYS"}],
-            "dateScale": "D",
-            "dateRangeSplitPerScale": True,
+            "dateRanges": [{"range": "LAST_7_DAYS"}], "dateScale": "D", "dateRangeSplitPerScale": True,
             "segmentFilterClauses": [{"field": "attributionrule", "operator": "IN", "value": [8]}]
         }]
     }
@@ -63,20 +81,15 @@ def get_data_v3():
     try:
         response = requests.post(url, headers=headers, json=payload)
         res = response.json()
-        
         if response.status_code != 200 or "data" not in res:
+            st.error(f"Erreur API : {res.get('error_msg', response.text)}")
             return pd.DataFrame()
 
         rows = []
         report = res["data"]["reports"][0]
-        
-        # Gestion des dates
         date_epochs = [v["epoch"] for v in report["columnHeader"]["dateRanges"][0]["values"]]
-        try:
-            dates = [datetime.fromtimestamp(e, tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d") for e in date_epochs]
-        except:
-            dates = [datetime.fromtimestamp(e).strftime("%Y-%m-%d") for e in date_epochs]
-
+        try: dates = [datetime.fromtimestamp(e, tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d") for e in date_epochs]
+        except: dates = [datetime.fromtimestamp(e).strftime("%Y-%m-%d") for e in date_epochs]
         metrics_names = [m["name"] for m in report["columnHeader"]["metrics"]]
 
         if "data" in report:
@@ -85,286 +98,182 @@ def get_data_v3():
                 for i, date_str in enumerate(dates):
                     metrics_values = []
                     for m in row["metrics"]:
-                        val = m[0]["values"][i] if i < len(m[0]["values"]) else 0
+                        val = 0
+                        if m and len(m) > 0:
+                            if "values" in m[0] and i < len(m[0]["values"]):
+                                val = m[0]["values"][i]
+                            elif "value" in m[0]:
+                                val = m[0]["value"]
                         metrics_values.append(float(val))
-
-                    row_dict = {
-                        "Date": date_str,
-                        "Levier": media_key,
-                        **dict(zip(metrics_names, metrics_values))
-                    }
-                    rows.append(row_dict)
+                    rows.append({"Date": date_str, "Levier": media_key, **dict(zip(metrics_names, metrics_values))})
 
         df = pd.DataFrame(rows)
-        
         if not df.empty:
-            # Renommage pour l'affichage (CA devient VA)
             df = df.rename(columns={
                 "visit": "Visites",
                 "realscartvalidamount": "VA",
                 "realscartvalid": "Commandes",
                 "media_key": "Levier"
             })
-            
-            # Nettoyage et Calculs
             df["VA"] = df["VA"].astype(float)
             df["Commandes"] = df["Commandes"].astype(int)
             df["Visites"] = df["Visites"].astype(int)
-            
-            # KPI Métier
             df["Tx_Conv"] = df["Commandes"] / df["Visites"].replace(0, 1)
             df["Panier_Moyen"] = df["VA"] / df["Commandes"].replace(0, 1)
-            
             return df
-
     except Exception as e:
+        st.error(f"Erreur technique : {e}")
         return pd.DataFrame()
+    return pd.DataFrame()
 
 # ==========================================
-# 3. CERVEAU D'ANALYSE HYBRIDE (PYTHON + MISTRAL)
+# 3. CERVEAU INTELLIGENT
 # ==========================================
-
 def analyser_contexte(question, df):
-    """ Filtre le tableau selon la question (Date / Levier) """
     df_filtered = df.copy()
-    filtres_appliques = []
-    q_lower = question.lower()
+    filtres = []
+    q = question.lower()
 
-    # 1. Filtre Levier
-    tous_leviers = df["Levier"].unique()
-    leviers_trouves = []
-    for levier in tous_leviers:
-        if str(levier).lower() in q_lower:
-            leviers_trouves.append(levier)
-    if leviers_trouves:
-        df_filtered = df_filtered[df_filtered["Levier"].isin(leviers_trouves)]
-        filtres_appliques.append(f"Levier : {', '.join(leviers_trouves)}")
+    for lev in df["Levier"].unique():
+        if str(lev).lower() in q:
+            df_filtered = df_filtered[df_filtered["Levier"] == lev]
+            filtres.append(f"Levier : {lev}")
+            break
 
-    # 2. Filtre Date
-    match_date = re.search(r'(?:le|du|au)\s+([0-2]?[0-9]|3[0-1])', q_lower)
-    if match_date:
-        jour = match_date.group(1).zfill(2)
+    match = re.search(r'\b([0-2]?[0-9]|3[0-1])\b', q)
+    if match and not any(k in q for k in ["top", "les"]): 
+        jour = match.group(1).zfill(2)
         df_temp = df_filtered[df_filtered["Date"].str.endswith(f"-{jour}")]
         if not df_temp.empty:
             df_filtered = df_temp
-            filtres_appliques.append(f"Date : le {jour}")
-    
-    msg_contexte = f" ({' | '.join(filtres_appliques)})" if filtres_appliques else ""
-    return df_filtered, msg_contexte
+            filtres.append(f"Date : le {jour}")
+
+    msg = f" ({' | '.join(filtres)})" if filtres else ""
+    return df_filtered, msg
 
 def detect_intent(question):
     q = question.lower()
-    if any(k in q for k in ["top", "classement", "meilleur", "pire", "plus grand", "plus gros", "premiers", "derniers", "liste"]): return "TOP"
+    if any(k in q for k in ["top", "classement", "meilleur", "pire"]): return "TOP"
     if any(k in q for k in ["record", "max", "pic", "jour", "quand"]): return "MAX"
-    if any(k in q for k in ["taux", "conversion", "panier", "moyen", "combien", "total", "va", "ca", "visite", "commande"]): return "METRIC"
+    if any(k in q for k in ["taux", "conversion", "panier", "moyen", "combien", "total", "va", "visite"]): return "METRIC"
     return "ANALYSE"
 
-def reponse_hybride(question, df, historique_chat):
+def reponse_hybride(question, df, historique):
     q = question.lower()
     df_context, info_msg = analyser_contexte(question, df)
     
-    if df_context.empty:
-        return "⚠️ Je ne trouve aucune donnée correspondant à vos filtres."
-
-    intent = detect_intent(question)
+    if df_context.empty: return "⚠️ Pas de données avec ces filtres."
     
-    # 2. CALCULS SYSTÉMATIQUES
-    total_va = df_context["VA"].sum()
-    total_vis = df_context["Visites"].sum()
-    total_cmd = df_context["Commandes"].sum()
-    contexte_tech = ""
+    intent = detect_intent(question)
+    tech_context = ""
 
-    # CAS 1 : CLASSEMENT
-    if intent == "TOP":
-        synthese = df_context.groupby("Levier")[["VA", "Visites", "Commandes"]].sum().reset_index()
-        synthese["Tx_Conv"] = synthese["Commandes"] / synthese["Visites"].replace(0, 1)
-        
-        col, label = "VA", "€"
-        if "commande" in q: col, label = "Commandes", "Cmds"
-        elif "visite" in q or "trafic" in q: col, label = "Visites", "Visites"
-        elif "panier" in q: col, label = "Panier_Moyen", "€ PM"
-        elif "taux" in q: col, label = "Tx_Conv", "% Conv"
+    if intent == "METRIC":
+        va = df_context["VA"].sum()
+        vis = df_context["Visites"].sum()
+        cmd = df_context["Commandes"].sum()
+        if "panier" in q: tech_context = f"Panier Moyen {info_msg}: {(va/cmd if cmd else 0):.2f} €"
+        elif "taux" in q: tech_context = f"Taux Conv {info_msg}: {(cmd/vis if vis else 0):.2%}"
+        elif "visite" in q: tech_context = f"Total Visites {info_msg}: {int(vis):,}"
+        else: tech_context = f"Total VA {info_msg}: {va:,.2f} €"
 
-        sens = True if any(x in q for x in ["pire", "moins", "faible"]) else False
-        match_n = re.search(r'(?:top|classement|les)\s*(\d+)', q)
-        top_n = int(match_n.group(1)) if match_n else 5
+    elif intent == "TOP":
+        grp = df_context.groupby("Levier")[["VA", "Visites", "Commandes"]].sum().reset_index()
+        col = "VA"
+        if "visite" in q: col = "Visites"
+        elif "commande" in q: col = "Commandes"
         
-        top = synthese.sort_values(col, ascending=sens).head(top_n)
+        sens = True if any(x in q for x in ["pire", "moins"]) else False
+        top = grp.sort_values(col, ascending=sens).head(5)
         
-        contexte_tech = f"CLASSEMENT PYTHON ({col}) :\n"
+        tech_context = f"CLASSEMENT PYTHON ({col}) :\n"
         for i, r in enumerate(top.itertuples(), 1):
             val = r._asdict()[col]
-            if col == "Tx_Conv": val_fmt = f"{val:.2%}"
-            elif col in ["VA", "Panier_Moyen"]: val_fmt = f"{val:,.0f} €"
-            else: val_fmt = f"{int(val)}"
-            contexte_tech += f"{i}. {r.Levier} ({val_fmt} {label})\n"
+            fmt = f"{val:,.0f} €" if col=="VA" else f"{int(val)}"
+            tech_context += f"{i}. {r.Levier} ({fmt})\n"
 
-    # CAS 2 : MÉTRIQUES
-    elif intent == "METRIC":
-        if "panier" in q:
-            pm = total_va / total_cmd if total_cmd > 0 else 0
-            contexte_tech = f"Panier Moyen Global : {pm:.2f} €"
-        elif "taux" in q:
-            tc = total_cmd / total_vis if total_vis > 0 else 0
-            contexte_tech = f"Taux de Conversion Global : {tc:.2%}"
-        elif "commande" in q:
-            contexte_tech = f"Total Commandes : {int(total_cmd)}"
-        elif "visite" in q:
-            contexte_tech = f"Total Visites : {int(total_vis):,}"
-        else:
-            contexte_tech = f"Total Volume d'Affaires (VA) : {total_va:,.2f} €"
-
-    # CAS 3 : RECORD
     elif intent == "MAX":
         col = "VA"
-        if "commande" in q: col = "Commandes"
-        elif "visite" in q: col = "Visites"
-        
+        if "visite" in q: col = "Visites"
         idx = df_context[col].idxmax()
         row = df_context.loc[idx]
-        contexte_tech = f"RECORD TROUVÉ PAR PYTHON : Le {row['Date']} ({row['Levier']}) avec {row[col]:,.0f} ({col})."
+        tech_context = f"RECORD {info_msg} : Le {row['Date']} ({row['Levier']}) avec {row[col]:,.0f}."
 
-    # CAS 4 : ANALYSE GÉNÉRALE
     else:
-        contexte_tech = f"""
-        CHIFFRES CLÉS (Période complète) :
-        - VA Total : {total_va:,.0f} €
-        - Visites : {int(total_vis)}
-        - Commandes : {int(total_cmd)}
-        """
+        tech_context = f"DONNÉES BRUTES :\n{df_context.head(50).to_csv(index=False, sep=';')}"
 
-    # DONNÉES DÉTAILLÉES (CSV)
-    try:
-        df_display = df_context.sort_values("VA", ascending=False).head(60)
-        csv_data = df_display.to_markdown(index=False)
-    except:
-        csv_data = df_context.head(60).to_csv(index=False, sep=";")
-
-    # APPEL MISTRAL
     client = Mistral(api_key=MISTRAL_API_KEY)
-    
-    prompt = f"""
-    Tu es un Data Analyst Expert pour SNCF Connect.
-    
-    Voici la RÉPONSE EXACTE calculée par le système (Utilise-la, c'est la vérité) :
-    ====================
-    {contexte_tech}
-    ====================
-    
-    Détail des données :
-    {csv_data}
-    
-    Question utilisateur : "{question}"
-    
-    Consignes : 
-    1. Reformule la réponse de la section "RÉPONSE EXACTE".
-    2. Ne recalcule rien.
-    3. Parle de "Volume d'Affaires (VA)".
+    prompt = f"""Tu es Data Analyst expert.
+    Voici la RÉPONSE CALCULÉE EXACTE (Utilise-la impérativement) :
+    ----------------
+    {tech_context}
+    ----------------
+    Question : "{question}"
+    Consigne : Fais une phrase naturelle. Ne recalcule rien. Parle de "Volume d'Affaires" (VA).
     """
     
     try:
         msgs = [{"role":"system", "content": prompt}]
-        for m in historique_chat[-2:]:
-            if "Je suis prêt" not in str(m["content"]):
-                msgs.append({"role": m["role"], "content": m["content"]})
-        
-        resp = client.chat.complete(model="open-mistral-nemo", messages=msgs)
-        return resp.choices[0].message.content
-    except Exception as e:
-        return f"Erreur IA : {e}"
+        for m in historique[-2:]:
+            if "Je suis prêt" not in str(m["content"]): msgs.append({"role":m["role"], "content":m["content"]})
+        return client.chat.complete(model="open-mistral-nemo", messages=msgs).choices[0].message.content
+    except Exception as e: return f"Erreur IA : {e}"
 
 # ==========================================
-# 4. INTERFACE UTILISATEUR "DASHBOARD"
+# 4. DASHBOARD UI
 # ==========================================
 st.title("📊 Eulerian Dashboard & Analyst")
-st.markdown("### Suivi des Performances Marketing (7 derniers jours)")
 
-if st.button("🔄 Actualiser les données"):
+if st.button("🔄 Actualiser"):
     st.cache_data.clear()
     st.rerun()
 
-df = get_data_v3()
+df = get_data()
 
 if not df.empty:
-    # --- A. BLOC KPIs ---
     k1, k2, k3, k4 = st.columns(4)
     total_va = df['VA'].sum()
-    total_visites = df['Visites'].sum()
-    total_commandes = df['Commandes'].sum()
-    global_tx = total_commandes / total_visites if total_visites > 0 else 0
-
-    k1.metric("Visites", f"{int(total_visites):,}".replace(",", " "))
+    k1.metric("Visites", f"{int(df['Visites'].sum()):,}".replace(",", " "))
     k2.metric("Volume d'Affaires", f"{total_va:,.0f} €".replace(",", " "))
-    k3.metric("Commandes", int(total_commandes))
-    k4.metric("Taux de Conv.", f"{global_tx:.2%}")
+    k3.metric("Commandes", int(df['Commandes'].sum()))
+    k4.metric("Taux Conv.", f"{(df['Commandes'].sum()/df['Visites'].sum()):.2%}")
     
     st.divider()
 
-    # --- B. GRAPHIQUE EN COURBES & TABLEAU ---
-    col_graph, col_table = st.columns([2, 1])
-
-    with col_graph:
-        st.subheader("📈 Évolution Temporelle")
-        
-        # Sélecteur de métrique pour le graphique
-        metrique_graph = st.radio(
-            "Choisir la courbe à afficher :",
-            ["VA", "Visites", "Commandes"],
-            horizontal=True
-        )
-        
-        # Préparation des données pour le Line Chart
-        # On veut : Index=Date, Colonnes=Levier, Valeurs=Metrique choisie
-        df_chart = df.pivot_table(index="Date", columns="Levier", values=metrique_graph, aggfunc="sum").fillna(0)
-        
-        # Affichage du graphique
-        st.line_chart(df_chart)
-
-    with col_table:
-        st.subheader("Détail par Levier")
-        # --- TABLEAU CORRIGÉ AVEC TOUTES LES COLONNES ---
-        # On agrège par levier
-        df_summary = df.groupby("Levier")[["VA", "Visites", "Commandes"]].sum().reset_index().sort_values("VA", ascending=False)
-        # On recalcule les taux sur les sommes
-        df_summary["Tx_Conv"] = df_summary["Commandes"] / df_summary["Visites"].replace(0, 1)
-        df_summary["Panier_Moyen"] = df_summary["VA"] / df_summary["Commandes"].replace(0, 1)
-
-        st.dataframe(
-            df_summary,
-            use_container_width=True,
-            column_config={
-                "Levier": st.column_config.TextColumn("Levier"),
-                "VA": st.column_config.NumberColumn("VA", format="%.0f €"),
-                "Visites": st.column_config.NumberColumn("Visites", format="%d"),
-                "Commandes": st.column_config.NumberColumn("Cmds", format="%d"),
-                "Tx_Conv": st.column_config.NumberColumn("Conv.", format="%.2f%%"),
-                "Panier_Moyen": st.column_config.NumberColumn("PM", format="%.0f €"),
-            },
-            hide_index=True
-        )
+    # SECTION DÉTAIL RESTAURÉE
+    with st.expander("🔎 Voir toutes les données brutes (Jours x Leviers)", expanded=False):
+        st.dataframe(df, use_container_width=True)
 
     st.divider()
 
-    # --- C. CHATBOT INTELLIGENT ---
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.subheader("Tendances")
+        metrique = st.radio("Courbe :", ["VA", "Visites", "Commandes"], horizontal=True)
+        chart = df.pivot_table(index="Date", columns="Levier", values=metrique, aggfunc="sum").fillna(0)
+        st.line_chart(chart)
+    
+    with c2:
+        st.subheader("Détail (Cumul)")
+        st.dataframe(
+            df.groupby("Levier")[["VA", "Visites"]].sum().sort_values("VA", ascending=False),
+            use_container_width=True,
+            column_config={"VA": st.column_config.NumberColumn(format="%.0f €")}
+        )
+
+    st.divider()
     st.subheader("🤖 Assistant IA")
-    st.info("Exemples : 'Top 3 VA', 'Quelle est la tendance du Mailing ?'")
+    if "messages" not in st.session_state: st.session_state.messages = []
+    
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]): st.markdown(m["content"])
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "Je suis prêt à analyser ce tableau pour vous."}]
-
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    if user_input := st.chat_input("Votre question..."):
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        
+    if q := st.chat_input("Posez une question..."):
+        st.session_state.messages.append({"role": "user", "content": q})
+        with st.chat_message("user"): st.markdown(q)
         with st.chat_message("assistant"):
-            with st.spinner("Analyse en cours..."):
-                rep = reponse_hybride(user_input, df, st.session_state.messages)
+            with st.spinner("Analyse..."):
+                rep = reponse_hybride(q, df, st.session_state.messages)
                 st.markdown(rep)
                 st.session_state.messages.append({"role": "assistant", "content": rep})
 else:
-    st.warning("⚠️ Pas de données. Vérifiez la connexion API.")
+    st.warning("⚠️ Pas de données.")
