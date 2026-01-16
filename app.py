@@ -13,7 +13,7 @@ from mistralai import Mistral
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Eulerian Analyst Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Eulerian Analyst Pro", page_icon="📈", layout="wide")
 
 # ⚠️ VOS CLÉS
 MISTRAL_API_KEY = "4RYLP7nnLh8BsoCRaaHA4pryfyLgIaxt" 
@@ -27,8 +27,7 @@ EULERIAN_SITE = "sncf-connect"
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_data_v3():
-    # CORRECTION : On utilise UNIQUEMENT les codes techniques ici pour que l'API comprenne
-    # (Nom technique, Nom technique) -> On ne met pas de français ici !
+    # Codes techniques pour l'API
     METRICS = [
         ("visit", "visit"),
         ("dvisitor", "dvisitor"),
@@ -66,7 +65,6 @@ def get_data_v3():
         res = response.json()
         
         if response.status_code != 200 or "data" not in res:
-            st.error(f"Erreur API : {res.get('error_msg', response.text)}")
             return pd.DataFrame()
 
         rows = []
@@ -87,16 +85,7 @@ def get_data_v3():
                 for i, date_str in enumerate(dates):
                     metrics_values = []
                     for m in row["metrics"]:
-                        # Correction : gestion sécurisée des valeurs
-                        if m and len(m) > 0:
-                            if "values" in m[0] and i < len(m[0]["values"]):
-                                val = m[0]["values"][i]
-                            elif "value" in m[0]:
-                                val = m[0]["value"]
-                            else:
-                                val = 0
-                        else:
-                            val = 0
+                        val = m[0]["values"][i] if i < len(m[0]["values"]) else 0
                         metrics_values.append(float(val))
 
                     row_dict = {
@@ -109,18 +98,18 @@ def get_data_v3():
         df = pd.DataFrame(rows)
         
         if not df.empty:
-            # C'EST ICI QU'ON RENOMME EN FRANÇAIS (CA -> VA)
+            # Renommage pour l'affichage (CA devient VA)
             df = df.rename(columns={
                 "visit": "Visites",
-                "realscartvalidamount": "VA", # On renomme le champ technique en VA
+                "realscartvalidamount": "VA",
                 "realscartvalid": "Commandes",
                 "media_key": "Levier"
             })
             
             # Nettoyage et Calculs
-            if "VA" in df.columns: df["VA"] = df["VA"].astype(float)
-            if "Commandes" in df.columns: df["Commandes"] = df["Commandes"].astype(int)
-            if "Visites" in df.columns: df["Visites"] = df["Visites"].astype(int)
+            df["VA"] = df["VA"].astype(float)
+            df["Commandes"] = df["Commandes"].astype(int)
+            df["Visites"] = df["Visites"].astype(int)
             
             # KPI Métier
             df["Tx_Conv"] = df["Commandes"] / df["Visites"].replace(0, 1)
@@ -129,7 +118,6 @@ def get_data_v3():
             return df
 
     except Exception as e:
-        st.error(f"Erreur technique : {e}")
         return pd.DataFrame()
 
 # ==========================================
@@ -142,7 +130,7 @@ def analyser_contexte(question, df):
     filtres_appliques = []
     q_lower = question.lower()
 
-    # 1. Filtre Levier (Recherche textuelle)
+    # 1. Filtre Levier
     tous_leviers = df["Levier"].unique()
     leviers_trouves = []
     for levier in tous_leviers:
@@ -152,7 +140,7 @@ def analyser_contexte(question, df):
         df_filtered = df_filtered[df_filtered["Levier"].isin(leviers_trouves)]
         filtres_appliques.append(f"Levier : {', '.join(leviers_trouves)}")
 
-    # 2. Filtre Date (Regex Avancé)
+    # 2. Filtre Date
     match_date = re.search(r'(?:le|du|au)\s+([0-2]?[0-9]|3[0-1])', q_lower)
     if match_date:
         jour = match_date.group(1).zfill(2)
@@ -166,75 +154,53 @@ def analyser_contexte(question, df):
 
 def detect_intent(question):
     q = question.lower()
-    if any(k in q for k in ["top", "classement", "meilleur", "pire", "plus grand", "plus gros", "premiers", "derniers", "liste", "les 3", "les 5", "les 10"]): return "TOP"
+    if any(k in q for k in ["top", "classement", "meilleur", "pire", "plus grand", "plus gros", "premiers", "derniers", "liste"]): return "TOP"
     if any(k in q for k in ["record", "max", "pic", "jour", "quand"]): return "MAX"
     if any(k in q for k in ["taux", "conversion", "panier", "moyen", "combien", "total", "va", "ca", "visite", "commande"]): return "METRIC"
     return "ANALYSE"
 
 def reponse_hybride(question, df, historique_chat):
     q = question.lower()
-    
-    # 1. FILTRAGE
     df_context, info_msg = analyser_contexte(question, df)
     
     if df_context.empty:
-        return "⚠️ Je ne trouve aucune donnée correspondant à vos filtres. Vérifiez la date ou le nom du levier."
+        return "⚠️ Je ne trouve aucune donnée correspondant à vos filtres."
 
     intent = detect_intent(question)
     
-    # 2. CALCULS SYSTÉMATIQUES (L'ANTISÈCHE)
+    # 2. CALCULS SYSTÉMATIQUES
     total_va = df_context["VA"].sum()
     total_vis = df_context["Visites"].sum()
     total_cmd = df_context["Commandes"].sum()
-    
     contexte_tech = ""
 
-    # --- ROUTAGE INTENTIONS ---
-
-    # CAS 1 : CLASSEMENT (TOP / FLOP)
+    # CAS 1 : CLASSEMENT
     if intent == "TOP":
-        # Agrégation par Levier
         synthese = df_context.groupby("Levier")[["VA", "Visites", "Commandes"]].sum().reset_index()
         synthese["Tx_Conv"] = synthese["Commandes"] / synthese["Visites"].replace(0, 1)
-        synthese["Panier_Moyen"] = synthese["VA"] / synthese["Commandes"].replace(0, 1)
-
-        # Choix de la colonne de tri
+        
+        col, label = "VA", "€"
         if "commande" in q: col, label = "Commandes", "Cmds"
         elif "visite" in q or "trafic" in q: col, label = "Visites", "Visites"
         elif "panier" in q: col, label = "Panier_Moyen", "€ PM"
-        elif "taux" in q or "conv" in q: col, label = "Tx_Conv", "% Conv"
-        else: col, label = "VA", "€" # Par défaut
+        elif "taux" in q: col, label = "Tx_Conv", "% Conv"
 
-        # Sens du tri (Croissant / Décroissant)
-        ascending = False # Par défaut (Meilleur en premier)
-        mot_ordre = "meilleurs"
-        
-        if any(x in q for x in ["pire", "moins", "faible", "petit", "bas", "croissant", "flop"]):
-            ascending = True
-            mot_ordre = "moins performants"
-
-        # Nombre d'éléments (Top N)
+        sens = True if any(x in q for x in ["pire", "moins", "faible"]) else False
         match_n = re.search(r'(?:top|classement|les)\s*(\d+)', q)
-        top_n = int(match_n.group(1)) if match_n else 5 # Par défaut 5
+        top_n = int(match_n.group(1)) if match_n else 5
         
-        top = synthese.sort_values(col, ascending=ascending).head(top_n)
+        top = synthese.sort_values(col, ascending=sens).head(top_n)
         
-        contexte_tech = f"CLASSEMENT CALCULÉ PAR PYTHON ({mot_ordre} sur {col}) :\n"
+        contexte_tech = f"CLASSEMENT PYTHON ({col}) :\n"
         for i, r in enumerate(top.itertuples(), 1):
             val = r._asdict()[col]
             if col == "Tx_Conv": val_fmt = f"{val:.2%}"
             elif col in ["VA", "Panier_Moyen"]: val_fmt = f"{val:,.0f} €"
             else: val_fmt = f"{int(val)}"
-            contexte_tech += f"{i+1}. {r.Levier} ({val_fmt} {label})\n"
+            contexte_tech += f"{i}. {r.Levier} ({val_fmt} {label})\n"
 
-    # CAS 2 : MÉTRIQUES (Total / Moyenne)
+    # CAS 2 : MÉTRIQUES
     elif intent == "METRIC":
-        # Détection Moyenne
-        is_avg = "moyenne" in q or "moyen" in q
-        nb_jours = df_context["Date"].nunique()
-        diviseur = nb_jours if (is_avg and "panier" not in q) else 1
-        prefixe = "Moyenne journalière" if diviseur > 1 else "Total"
-        
         if "panier" in q:
             pm = total_va / total_cmd if total_cmd > 0 else 0
             contexte_tech = f"Panier Moyen Global : {pm:.2f} €"
@@ -242,16 +208,13 @@ def reponse_hybride(question, df, historique_chat):
             tc = total_cmd / total_vis if total_vis > 0 else 0
             contexte_tech = f"Taux de Conversion Global : {tc:.2%}"
         elif "commande" in q:
-            val = total_cmd / diviseur
-            contexte_tech = f"{prefixe} Commandes : {int(val)}"
+            contexte_tech = f"Total Commandes : {int(total_cmd)}"
         elif "visite" in q:
-            val = total_vis / diviseur
-            contexte_tech = f"{prefixe} Visites : {int(val):,}"
+            contexte_tech = f"Total Visites : {int(total_vis):,}"
         else:
-            val = total_va / diviseur
-            contexte_tech = f"{prefixe} Volume d'Affaires (VA) : {val:,.2f} €"
+            contexte_tech = f"Total Volume d'Affaires (VA) : {total_va:,.2f} €"
 
-    # CAS 3 : RECORD TEMPOREL
+    # CAS 3 : RECORD
     elif intent == "MAX":
         col = "VA"
         if "commande" in q: col = "Commandes"
@@ -259,8 +222,7 @@ def reponse_hybride(question, df, historique_chat):
         
         idx = df_context[col].idxmax()
         row = df_context.loc[idx]
-        val_fmt = f"{int(row[col])}" if col != "VA" else f"{row[col]:,.0f} €"
-        contexte_tech = f"RECORD TROUVÉ PAR PYTHON : Le {row['Date']} ({row['Levier']}) avec {val_fmt} ({col})."
+        contexte_tech = f"RECORD TROUVÉ PAR PYTHON : Le {row['Date']} ({row['Levier']}) avec {row[col]:,.0f} ({col})."
 
     # CAS 4 : ANALYSE GÉNÉRALE
     else:
@@ -271,36 +233,33 @@ def reponse_hybride(question, df, historique_chat):
         - Commandes : {int(total_cmd)}
         """
 
-    # 3. DONNÉES DÉTAILLÉES (CSV)
+    # DONNÉES DÉTAILLÉES (CSV)
     try:
         df_display = df_context.sort_values("VA", ascending=False).head(60)
-        df_display["VA"] = df_display["VA"].apply(lambda x: f"{x:.0f}")
         csv_data = df_display.to_markdown(index=False)
     except:
         csv_data = df_context.head(60).to_csv(index=False, sep=";")
 
-    # 4. APPEL MISTRAL
+    # APPEL MISTRAL
     client = Mistral(api_key=MISTRAL_API_KEY)
     
     prompt = f"""
     Tu es un Data Analyst Expert pour SNCF Connect.
     
-    L'utilisateur pose une question.
-    Pour répondre, base-toi PRIORITAIREMENT sur la "Fiche Technique" ci-dessous car elle contient les calculs exacts faits par le système (Python).
-    
+    Voici la RÉPONSE EXACTE calculée par le système (Utilise-la, c'est la vérité) :
     ====================
     {contexte_tech}
     ====================
     
-    Détail des données (si besoin) :
+    Détail des données :
     {csv_data}
     
     Question utilisateur : "{question}"
     
     Consignes : 
-    1. Reformule la réponse de la section "RÉPONSE EXACTE" de manière naturelle et pro.
-    2. Ne recalcule rien si la réponse est déjà dans la fiche technique.
-    3. Parle de "Volume d'Affaires (VA)" et non de CA.
+    1. Reformule la réponse de la section "RÉPONSE EXACTE".
+    2. Ne recalcule rien.
+    3. Parle de "Volume d'Affaires (VA)".
     """
     
     try:
@@ -341,27 +300,36 @@ if not df.empty:
     
     st.divider()
 
-    # --- B. GRAPHIQUE & TABLEAU ---
-    col_graph, col_table = st.columns([1, 2])
+    # --- B. GRAPHIQUE EN COURBES & TABLEAU ---
+    col_graph, col_table = st.columns([2, 1])
 
     with col_graph:
-        st.subheader("Répartition du VA par Levier")
-        df_chart = df.groupby("Levier")["VA"].sum().reset_index().sort_values("VA", ascending=False)
-        st.bar_chart(df_chart, x="Levier", y="VA", color="#ffcd00")
+        st.subheader("📈 Évolution Temporelle")
+        
+        # Sélecteur de métrique pour le graphique
+        metrique_graph = st.radio(
+            "Choisir la courbe à afficher :",
+            ["VA", "Visites", "Commandes"],
+            horizontal=True
+        )
+        
+        # Préparation des données pour le Line Chart
+        # On veut : Index=Date, Colonnes=Levier, Valeurs=Metrique choisie
+        df_chart = df.pivot_table(index="Date", columns="Levier", values=metrique_graph, aggfunc="sum").fillna(0)
+        
+        # Affichage du graphique
+        st.line_chart(df_chart)
 
     with col_table:
-        st.subheader("Détail des données")
+        st.subheader("Détail par Levier")
+        # Petit tableau récapitulatif à droite
+        df_summary = df.groupby("Levier")[["VA", "Visites"]].sum().reset_index().sort_values("VA", ascending=False)
         st.dataframe(
-            df,
+            df_summary,
             use_container_width=True,
             column_config={
-                "Date": st.column_config.TextColumn("Date"),
-                "Levier": st.column_config.TextColumn("Levier"),
-                "Visites": st.column_config.NumberColumn("Visites", format="%d"),
-                "VA": st.column_config.NumberColumn("Volume d'Affaires", format="%.2f €"),
-                "Commandes": st.column_config.NumberColumn("Cmds"),
-                "Tx_Conv": st.column_config.ProgressColumn("Taux Conv.", format="%.2f%%", min_value=0, max_value=max(df["Tx_Conv"].max(), 0.05)),
-                "Panier_Moyen": st.column_config.NumberColumn("Panier Moyen", format="%.2f €"),
+                "VA": st.column_config.NumberColumn(format="%.0f €"),
+                "Visites": st.column_config.NumberColumn(format="%d"),
             },
             hide_index=True
         )
@@ -370,7 +338,7 @@ if not df.empty:
 
     # --- C. CHATBOT INTELLIGENT ---
     st.subheader("🤖 Assistant IA")
-    st.info("Exemples : 'Top 3 VA', 'Moyenne des visites', 'Combien de VA pour le Mailing le 21 ?'")
+    st.info("Exemples : 'Top 3 VA', 'Quelle est la tendance du Mailing ?'")
 
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": "Je suis prêt à analyser ce tableau pour vous."}]
