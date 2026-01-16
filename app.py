@@ -16,6 +16,7 @@ from mistralai import Mistral
 # ==========================================
 st.set_page_config(page_title="Eulerian Analyst Pro", page_icon="🔒", layout="wide")
 
+# --- SYSTÈME DE MOT DE PASSE ---
 def check_password():
     """Vérifie le mot de passe pour accéder à l'app."""
     def password_entered():
@@ -34,15 +35,17 @@ def check_password():
         st.error("Mot de passe incorrect")
     return False
 
+# 🛑 BLOQUAGE : Si pas de mot de passe, on s'arrête là.
 if not check_password():
     st.stop()
 
-# --- VOS CLÉS ---
+# --- VOS CLÉS (Gestion locale et Cloud) ---
 try:
     MISTRAL_API_KEY = st.secrets["MISTRAL_API_KEY"]
     EULERIAN_TOKEN = st.secrets["EULERIAN_TOKEN"]
     EULERIAN_USER_TOKEN = st.secrets["EULERIAN_USER_TOKEN"]
 except:
+    # Fallback pour le test local si secrets non configurés
     MISTRAL_API_KEY = "4RYLP7nnLh8BsoCRaaHA4pryfyLgIaxt" 
     EULERIAN_TOKEN = "PC3qOHIpm.Vp0nKozLS_XfY50IDyOEOXb8EFi07MAsFPmw--"
     EULERIAN_USER_TOKEN = "QV.tEbjPNGLjgHPax6VWH_oe8sU7fhKeoQV7eaAVymv2erwLJQ--"
@@ -51,12 +54,13 @@ EULERIAN_HOST = "sncfc.api.eulerian.com"
 EULERIAN_SITE = "sncf-connect"
 
 # ==========================================
-# 2. MOTEUR DE DONNÉES (FIABLE)
+# 2. MOTEUR DE DONNÉES (FIABLE & ROBUSTE)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_data():
+    # Codes techniques UNIQUEMENT ici (ne pas modifier)
     METRICS = [
-        ("visit", "Visites"),
+        ("visit", "visit"),
         ("dvisitor", "dvisitor"),
         ("hit", "hit"),
         ("realscartvalidamount", "realscartvalidamount"),
@@ -86,60 +90,85 @@ def get_data():
             return pd.DataFrame()
 
         rows = []
-        report = res["data"]["reports"][0]
-        date_epochs = [v["epoch"] for v in report["columnHeader"]["dateRanges"][0]["values"]]
-        try: dates = [datetime.fromtimestamp(e, tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d") for e in date_epochs]
-        except: dates = [datetime.fromtimestamp(e).strftime("%Y-%m-%d") for e in date_epochs]
-        metrics_names = [m["name"] for m in report["columnHeader"]["metrics"]]
+        # Vérification qu'il y a bien des rapports
+        if "reports" in res["data"] and len(res["data"]["reports"]) > 0:
+            report = res["data"]["reports"][0]
+            
+            # Gestion sécurisée des dates
+            date_epochs = [v["epoch"] for v in report["columnHeader"]["dateRanges"][0]["values"]]
+            try: dates = [datetime.fromtimestamp(e, tz=ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d") for e in date_epochs]
+            except: dates = [datetime.fromtimestamp(e).strftime("%Y-%m-%d") for e in date_epochs]
+            
+            metrics_names = [m["name"] for m in report["columnHeader"]["metrics"]]
 
-        if "data" in report:
-            for row in report["data"]:
-                media_key = row["dimensions"][0]
-                for i, date_str in enumerate(dates):
-                    metrics_values = []
-                    for m in row["metrics"]:
-                        val = 0
-                        if m and len(m) > 0:
-                            if "values" in m[0] and i < len(m[0]["values"]):
-                                val = m[0]["values"][i]
-                            elif "value" in m[0]:
-                                val = m[0]["value"]
-                        metrics_values.append(float(val))
-                    rows.append({"Date": date_str, "Levier": media_key, **dict(zip(metrics_names, metrics_values))})
+            if "data" in report:
+                for row in report["data"]:
+                    media_key = row["dimensions"][0]
+                    for i, date_str in enumerate(dates):
+                        metrics_values = []
+                        for m in row["metrics"]:
+                            # Parsing sécurisé des valeurs (évite les bugs si vide)
+                            val = 0
+                            if m and len(m) > 0:
+                                if "values" in m[0] and i < len(m[0]["values"]):
+                                    val = m[0]["values"][i]
+                                elif "value" in m[0]:
+                                    val = m[0]["value"]
+                            metrics_values.append(float(val))
+                        rows.append({"Date": date_str, "Levier": media_key, **dict(zip(metrics_names, metrics_values))})
 
         df = pd.DataFrame(rows)
+        
         if not df.empty:
-            df = df.rename(columns={
+            # 1. On remplit les vides par 0
+            df = df.fillna(0)
+
+            # 2. Renommage Tolérant (Gère les variations de l'API)
+            rename_map = {
                 "visit": "Visites",
+                "visits": "Visites", # Au cas où
                 "realscartvalidamount": "VA",
                 "realscartvalid": "Commandes",
                 "media_key": "Levier"
-            })
+            }
+            df = df.rename(columns=rename_map)
+
+            # 3. Vérification des colonnes critiques
+            for col in ["Visites", "VA", "Commandes"]:
+                if col not in df.columns:
+                    df[col] = 0
+
+            # 4. Typage et Calculs KPI
             df["VA"] = df["VA"].astype(float)
             df["Commandes"] = df["Commandes"].astype(int)
             df["Visites"] = df["Visites"].astype(int)
+            
             df["Tx_Conv"] = df["Commandes"] / df["Visites"].replace(0, 1)
             df["Panier_Moyen"] = df["VA"] / df["Commandes"].replace(0, 1)
+            
             return df
+            
     except Exception as e:
         st.error(f"Erreur technique : {e}")
         return pd.DataFrame()
     return pd.DataFrame()
 
 # ==========================================
-# 3. CERVEAU INTELLIGENT
+# 3. CERVEAU INTELLIGENT (FILTRES + CALCULS)
 # ==========================================
 def analyser_contexte(question, df):
     df_filtered = df.copy()
     filtres = []
     q = question.lower()
 
+    # Filtre Levier
     for lev in df["Levier"].unique():
         if str(lev).lower() in q:
             df_filtered = df_filtered[df_filtered["Levier"] == lev]
             filtres.append(f"Levier : {lev}")
             break
 
+    # Filtre Date (Regex)
     match = re.search(r'\b([0-2]?[0-9]|3[0-1])\b', q)
     if match and not any(k in q for k in ["top", "les"]): 
         jour = match.group(1).zfill(2)
@@ -167,6 +196,7 @@ def reponse_hybride(question, df, historique):
     intent = detect_intent(question)
     tech_context = ""
 
+    # --- CALCULS PYTHON (Infaillible) ---
     if intent == "METRIC":
         va = df_context["VA"].sum()
         vis = df_context["Visites"].sum()
@@ -174,7 +204,7 @@ def reponse_hybride(question, df, historique):
         if "panier" in q: tech_context = f"Panier Moyen {info_msg}: {(va/cmd if cmd else 0):.2f} €"
         elif "taux" in q: tech_context = f"Taux Conv {info_msg}: {(cmd/vis if vis else 0):.2%}"
         elif "visite" in q: tech_context = f"Total Visites {info_msg}: {int(vis):,}"
-        else: tech_context = f"Total VA {info_msg}: {va:,.2f} €"
+        else: tech_context = f"Total Volume d'Affaires {info_msg}: {va:,.2f} €"
 
     elif intent == "TOP":
         grp = df_context.groupby("Levier")[["VA", "Visites", "Commandes"]].sum().reset_index()
@@ -201,6 +231,7 @@ def reponse_hybride(question, df, historique):
     else:
         tech_context = f"DONNÉES BRUTES :\n{df_context.head(50).to_csv(index=False, sep=';')}"
 
+    # --- REDACTION MISTRAL ---
     client = Mistral(api_key=MISTRAL_API_KEY)
     prompt = f"""Tu es Data Analyst expert.
     Voici la RÉPONSE CALCULÉE EXACTE (Utilise-la impérativement) :
@@ -230,16 +261,19 @@ if st.button("🔄 Actualiser"):
 df = get_data()
 
 if not df.empty:
+    # --- DEBUG OPTIONNEL (Si besoin) ---
+    # st.write("Colonnes :", df.columns.tolist())
+
     k1, k2, k3, k4 = st.columns(4)
     total_va = df['VA'].sum()
     k1.metric("Visites", f"{int(df['Visites'].sum()):,}".replace(",", " "))
     k2.metric("Volume d'Affaires", f"{total_va:,.0f} €".replace(",", " "))
     k3.metric("Commandes", int(df['Commandes'].sum()))
-    k4.metric("Taux Conv.", f"{(df['Commandes'].sum()/df['Visites'].sum()):.2%}")
+    k4.metric("Taux Conv.", f"{(df['Commandes'].sum()/df['Visites'].sum() if df['Visites'].sum() > 0 else 0):.2%}")
     
     st.divider()
 
-    # SECTION DÉTAIL RESTAURÉE
+    # --- SECTION DÉTAIL COMPLET (RESTAURÉE) ---
     with st.expander("🔎 Voir toutes les données brutes (Jours x Leviers)", expanded=False):
         st.dataframe(df, use_container_width=True)
 
@@ -276,4 +310,4 @@ if not df.empty:
                 st.markdown(rep)
                 st.session_state.messages.append({"role": "assistant", "content": rep})
 else:
-    st.warning("⚠️ Pas de données.")
+    st.warning("⚠️ Pas de données. Vérifiez la connexion API.")
