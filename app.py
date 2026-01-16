@@ -20,7 +20,7 @@ st.set_page_config(page_title="Eulerian Analyst Pro", page_icon="🔒", layout="
 def check_password():
     """Vérifie le mot de passe pour accéder à l'app."""
     def password_entered():
-        if hmac.compare_digest(st.session_state["password"], "SNCF_TEAM_2024"):
+        if hmac.compare_digest(st.session_state["password"], "anti-rh"):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
